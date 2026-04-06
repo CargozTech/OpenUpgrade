@@ -1,0 +1,6 @@
+ move_id |    move_create_date     | product_name                                   | product_category_id | product_category_name | move_category_id | move_category_name
+---------+-------------------------+------------------------------------------------+---------------------+-----------------------+------------------+-------------------
+ 113414  | 2025-07-11 07:26:01     | THERMOL D- 20 CARTONS 1 LTRx25                  | 1                   | Unit                  | 8                | Storage
+ 113415  | 2025-07-11 07:26:01     | THERMOL D -75 MS DRUMS OF 20 LTRS               | 1                   | Unit                  | 8                | Storage
+ 113762  | 2025-07-14 06:50:59     | THERMOL D- 20 CARTONS 1 LTRx25                  | 1                   | Unit                  | 8                | Storage
+ 113763  | 2025-07-14 06:50:59     | THERMOL D -75 MS DRUMS OF 20 LTRS               | 1                   | Unit                  | 8                | Storage

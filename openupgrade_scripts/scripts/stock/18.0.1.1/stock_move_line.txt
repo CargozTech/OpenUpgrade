@@ -1,0 +1,3 @@
+ move_id | move_line_id | move_uom_id | move_uom_name | move_category_id | move_category_name | move_line_uom_id | move_line_uom_name | move_line_category_id | move_line_category_name
+---------+--------------+-------------+---------------+------------------+--------------------+------------------+--------------------+------------------------+------------------------
+ 99915   | 98467        | 1           | Units         | 1                | Unit               | 34               | Unit               | 8                      | Storage

@@ -1,6 +1,8 @@
 # Copyright 2025 ForgeFlow S.L. (https://www.forgeflow.com)
 # License AGPL-3.0 or later (https://www.gnu.org/licenses/agpl).
 from openupgradelib import openupgrade, openupgrade_180
+import logging
+_logger = logging.getLogger(__name__)
 
 
 def convert_company_dependent(env):
@@ -17,6 +19,39 @@ def convert_company_dependent(env):
     openupgrade_180.convert_company_dependent(
         env, "res.partner", "property_stock_supplier"
     )
+
+def _fix_warehouse_related_companies(env):
+    """
+    Fix company_id mismatches for all warehouse-related records.
+    This ensures locations, routes, and picking types match warehouse company.
+    """
+    all_warehouses = env["stock.warehouse"].with_context(active_test=False).search([])
+
+    for wh in all_warehouses:
+        if not wh.company_id:
+            continue
+
+        # Fix all warehouse locations
+        location_fields = [
+            ('view_location_id', wh.view_location_id),
+            ('lot_stock_id', wh.lot_stock_id),
+            ('wh_input_stock_loc_id', wh.wh_input_stock_loc_id),
+            ('wh_qc_stock_loc_id', wh.wh_qc_stock_loc_id),
+            ('wh_output_stock_loc_id', wh.wh_output_stock_loc_id),
+            ('wh_pack_stock_loc_id', wh.wh_pack_stock_loc_id),
+        ]
+
+        for field_name, location in location_fields:
+            if location and location.company_id and location.company_id != wh.company_id:
+                location.sudo()._write({'company_id': wh.company_id.id})
+                location.invalidate_recordset(['company_id'])
+
+        # Fix all warehouse routes
+        if wh.route_ids:
+            for route in wh.route_ids:
+                if route.company_id and route.company_id != wh.company_id:
+                    route.sudo()._write({'company_id': wh.company_id.id})
+                    route.invalidate_recordset(['company_id'])
 
 
 def _create_default_new_types_for_all_warehouses(env):
@@ -66,8 +101,9 @@ def _create_default_new_types_for_all_warehouses(env):
             )
             # create picking type
             picking_type_id = env["stock.picking.type"].create(values).id
-            # update picking type for warehouse
-            wh.write({field: picking_type_id})
+            # update picking type for warehouse using _write() to bypass company checks
+            wh.sudo()._write({field: picking_type_id})
+            wh.invalidate_recordset([field])
 
 
 def _set_inter_company_locations(env):
@@ -87,9 +123,96 @@ def _set_inter_company_locations(env):
             # we leave everything as it was
             inter_company_location.sudo().write({"active": False})
 
+def _fix_uom_category_mismatches(env):
+    """Align move and move line UoM with the product base UoM when UoM categories differ."""
+    openupgrade.logged_query(
+        env.cr,
+        """
+        WITH mismatches AS (
+            SELECT sm.id AS move_id, pt.uom_id AS new_uom
+            FROM stock_move sm
+            JOIN product_product pp ON pp.id = sm.product_id
+            JOIN product_template pt ON pt.id = pp.product_tmpl_id
+            JOIN uom_uom mu ON mu.id = sm.product_uom
+            JOIN uom_uom pu ON pu.id = pt.uom_id
+            WHERE pu.category_id != mu.category_id
+              AND pt.uom_id IS NOT NULL
+        )
+        UPDATE stock_move sm
+        SET product_uom = mismatches.new_uom
+        FROM mismatches
+        WHERE sm.id = mismatches.move_id
+        """,
+    )
+    fixed_moves = env.cr.rowcount
+
+    openupgrade.logged_query(
+        env.cr,
+        """
+        WITH mismatches AS (
+            SELECT sml.id AS line_id, pt.uom_id AS new_uom
+            FROM stock_move_line sml
+            JOIN product_product pp ON pp.id = sml.product_id
+            JOIN product_template pt ON pt.id = pp.product_tmpl_id
+            JOIN uom_uom mu ON mu.id = sml.product_uom_id
+            JOIN uom_uom pu ON pu.id = pt.uom_id
+            WHERE pu.category_id != mu.category_id
+              AND pt.uom_id IS NOT NULL
+        )
+        UPDATE stock_move_line sml
+        SET product_uom_id = mismatches.new_uom
+        FROM mismatches
+        WHERE sml.id = mismatches.line_id
+        """,
+    )
+    fixed_lines = env.cr.rowcount
+
+    env.cr.execute(
+        """
+        SELECT COUNT(*)
+        FROM stock_move sm
+        JOIN uom_uom mu ON mu.id = sm.product_uom
+        JOIN product_product pp ON sm.product_id = pp.id
+        JOIN product_template pt ON pt.id = pp.product_tmpl_id
+        JOIN uom_uom pu ON pu.id = pt.uom_id
+        WHERE pu.category_id != mu.category_id
+        """
+    )
+    remaining_moves = env.cr.fetchone()[0]
+
+    env.cr.execute(
+        """
+        SELECT COUNT(*)
+        FROM stock_move_line sml
+        JOIN product_product pp ON pp.id = sml.product_id
+        JOIN product_template pt ON pt.id = pp.product_tmpl_id
+        JOIN uom_uom mu ON mu.id = sml.product_uom_id
+        JOIN uom_uom pu ON pu.id = pt.uom_id
+        WHERE pu.category_id != mu.category_id
+          AND pt.uom_id IS NOT NULL
+        """
+    )
+    remaining_lines = env.cr.fetchone()[0]
+
+    _logger.info(
+        "UoM fix: moves=%s lines=%s remaining_moves=%s remaining_lines=%s",
+        fixed_moves,
+        fixed_lines,
+        remaining_moves,
+        remaining_lines,
+    )
+    if remaining_moves or remaining_lines:
+        _logger.warning(
+            "UoM category mismatches remain: moves=%s lines=%s",
+            remaining_moves,
+            remaining_lines,
+        )
+
 
 @openupgrade.migrate()
 def migrate(env, version):
+    _fix_uom_category_mismatches(env)
+    _fix_warehouse_related_companies(env)
     convert_company_dependent(env)
     _create_default_new_types_for_all_warehouses(env)
     _set_inter_company_locations(env)
