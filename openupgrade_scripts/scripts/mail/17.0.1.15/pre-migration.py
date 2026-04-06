@@ -135,9 +135,58 @@ def _mail_activity_plan(env):
         ],
     )
 
+def _fix_discuss_channel_member_duplicates(env):
+    """
+    Fix duplicate key violations in discuss_channel_member table.
+    The mail module's XML data tries to create records that may already exist
+    from migrated data. We need to:
+    1. Remove duplicate records keeping only one per (channel_id, partner_id)
+    2. Delete specific records that will be recreated by XML data
+    3. Clean up ir_model_data references
+    """
+    table_name = "mail_channel_member"
+    if openupgrade.table_exists(env.cr, "discuss_channel_member"):
+        table_name = "discuss_channel_member"
+    if not openupgrade.table_exists(env.cr, table_name):
+        return
+
+    # Remove ir_model_data entries for records that will be recreated
+    openupgrade.logged_query(
+        env.cr,
+        """
+        DELETE FROM ir_model_data
+            WHERE module = 'mail'
+              AND name = 'channel_member_general_channel_for_admin';
+        """
+    )
+
+    openupgrade.logged_query(
+        env.cr,
+        f"""
+        DELETE FROM {table_name} m
+            WHERE m.channel_id = (
+                SELECT res_id FROM ir_model_data
+                WHERE module = 'mail' AND name = 'channel_all_employees'
+                  AND model IN ('discuss.channel', 'mail.channel')
+                LIMIT 1
+            )
+            AND m.partner_id = (
+                SELECT res_id FROM ir_model_data
+                WHERE module = 'base' AND name = 'partner_admin' AND model = 'res.partner'
+                LIMIT 1
+            );
+        """
+    )
+
+
+
+
+
 
 @openupgrade.migrate()
 def migrate(env, version):
+    # Fix duplicate channel members BEFORE renaming tables
+    _fix_discuss_channel_member_duplicates(env)
     openupgrade.rename_models(env.cr, _models_renames)
     openupgrade.rename_tables(env.cr, _tables_renames)
     openupgrade.rename_fields(env, _fields_renames)
