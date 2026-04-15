@@ -90,6 +90,22 @@ def _create_default_new_types_for_all_warehouses(env):
             values = wh._get_picking_type_update_values()[field]
             create_data, _ = wh._get_picking_type_create_values(max_sequence)
             values.update(create_data[field])
+            src_loc_id = values.get("default_location_src_id")
+            dest_loc_id = values.get("default_location_dest_id")
+            if src_loc_id:
+                src_loc = env["stock.location"].browse(src_loc_id)
+                if src_loc and src_loc.company_id and src_loc.company_id != wh.company_id:
+                    src_loc.sudo()._write({"company_id": wh.company_id.id})
+                    src_loc.invalidate_recordset(["company_id"])
+            if dest_loc_id:
+                dest_loc = env["stock.location"].browse(dest_loc_id)
+                if (
+                    dest_loc
+                    and dest_loc.company_id
+                    and dest_loc.company_id != wh.company_id
+                ):
+                    dest_loc.sudo()._write({"company_id": wh.company_id.id})
+                    dest_loc.invalidate_recordset(["company_id"])
             sequence = env["ir.sequence"].create(sequence_data[field])
             values.update(
                 warehouse_id=wh.id,
@@ -124,49 +140,51 @@ def _set_inter_company_locations(env):
             inter_company_location.sudo().write({"active": False})
 
 def _fix_uom_category_mismatches(env):
-    """Align move and move line UoM with the product base UoM when UoM categories differ."""
-    openupgrade.logged_query(
-        env.cr,
+    """
+    Migration fix for `stock_move.product_uom` category mismatches, applied
+    only when a name-based UoM match exists in the product UoM category.
+
+    Behavior:
+    - Detect stock moves where move UoM category differs from product template UoM category.
+    - Try to find a target UoM in the product category whose normalized name matches
+      the move UoM normalized name (lower + trim + singularized trailing 's').
+    - Update only matched rows; unmatched rows are left unchanged.
+    """
+
+    # Update only name-matched mismatches
+    env.cr.execute(
         """
-        WITH mismatches AS (
-            SELECT sm.id AS move_id, pt.uom_id AS new_uom
+        WITH candidates AS (
+            SELECT
+                sm.id AS move_id,
+                MIN(ut.id) AS new_uom_id
             FROM stock_move sm
             JOIN product_product pp ON pp.id = sm.product_id
             JOIN product_template pt ON pt.id = pp.product_tmpl_id
             JOIN uom_uom mu ON mu.id = sm.product_uom
             JOIN uom_uom pu ON pu.id = pt.uom_id
-            WHERE pu.category_id != mu.category_id
-              AND pt.uom_id IS NOT NULL
+            JOIN uom_uom ut ON ut.category_id = pu.category_id
+            WHERE pt.uom_id IS NOT NULL
+              AND pu.category_id IS DISTINCT FROM mu.category_id
+              AND regexp_replace(
+                    lower(btrim(COALESCE(mu.name->>'en_US', mu.name::text))),
+                    's$', '', 'g'
+                  ) = regexp_replace(
+                    lower(btrim(COALESCE(ut.name->>'en_US', ut.name::text))),
+                    's$', '', 'g'
+                  )
+            GROUP BY sm.id
         )
         UPDATE stock_move sm
-        SET product_uom = mismatches.new_uom
-        FROM mismatches
-        WHERE sm.id = mismatches.move_id
-        """,
-    )
-    fixed_moves = env.cr.rowcount
-
-    openupgrade.logged_query(
-        env.cr,
+        SET product_uom = c.new_uom_id
+        FROM candidates c
+        WHERE sm.id = c.move_id
+          AND sm.product_uom IS DISTINCT FROM c.new_uom_id;
         """
-        WITH mismatches AS (
-            SELECT sml.id AS line_id, pt.uom_id AS new_uom
-            FROM stock_move_line sml
-            JOIN product_product pp ON pp.id = sml.product_id
-            JOIN product_template pt ON pt.id = pp.product_tmpl_id
-            JOIN uom_uom mu ON mu.id = sml.product_uom_id
-            JOIN uom_uom pu ON pu.id = pt.uom_id
-            WHERE pu.category_id != mu.category_id
-              AND pt.uom_id IS NOT NULL
-        )
-        UPDATE stock_move_line sml
-        SET product_uom_id = mismatches.new_uom
-        FROM mismatches
-        WHERE sml.id = mismatches.line_id
-        """,
     )
-    fixed_lines = env.cr.rowcount
+    fixed_count = env.cr.rowcount
 
+    # Remaining category mismatches (including non-name-matched rows)
     env.cr.execute(
         """
         SELECT COUNT(*)
@@ -175,47 +193,204 @@ def _fix_uom_category_mismatches(env):
         JOIN product_product pp ON sm.product_id = pp.id
         JOIN product_template pt ON pt.id = pp.product_tmpl_id
         JOIN uom_uom pu ON pu.id = pt.uom_id
-        WHERE pu.category_id != mu.category_id
+        WHERE pt.uom_id IS NOT NULL
+          AND pu.category_id IS DISTINCT FROM mu.category_id;
         """
     )
-    remaining_moves = env.cr.fetchone()[0]
+    remaining = env.cr.fetchone()[0]
 
+    if fixed_count:
+        _logger.info(
+            "Fixed %s stock.move records by name-matched UoM remap; %s mismatches remain.",
+            fixed_count,
+            remaining,
+        )
+    else:
+        _logger.info(
+            "No name-matched stock.move UoM category mismatches found; %s mismatches remain.",
+            remaining,
+        )
+
+
+def _fix_uom_category_mismatches_stock_move_line(env):
+    """
+    Fix UoM category mismatches in stock.move.line records.
+
+    (A) Line UoM vs product — align to product_template.uom_id when categories differ.
+    (B) Line UoM vs parent stock_move.product_uom — REQUIRED for stock.move
+        _compute_quantity(): it converts each line qty from line.product_uom_id to
+        move.product_uom; those two must share the same uom.category_id.
+        Aligning only to the product is not enough if move.product_uom still differs.
+    """
+    # (A) Lines vs product template UoM
     env.cr.execute(
         """
-        SELECT COUNT(*)
-        FROM stock_move_line sml
-        JOIN product_product pp ON pp.id = sml.product_id
-        JOIN product_template pt ON pt.id = pp.product_tmpl_id
-        JOIN uom_uom mu ON mu.id = sml.product_uom_id
-        JOIN uom_uom pu ON pu.id = pt.uom_id
-        WHERE pu.category_id != mu.category_id
-          AND pt.uom_id IS NOT NULL
+           WITH line_vals AS (
+                SELECT
+                    sml.move_id,
+                    MIN(sml.product_id) AS line_product_id,
+                    MIN(sml.product_uom_id) AS line_uom_id
+                FROM stock_move_line sml
+                WHERE sml.product_id IS NOT NULL
+                  AND sml.product_uom_id IS NOT NULL
+                GROUP BY sml.move_id
+                HAVING COUNT(DISTINCT sml.product_id) = 1
+                   AND COUNT(DISTINCT sml.product_uom_id) = 1
+            )
+            UPDATE stock_move sm
+            SET product_id = lv.line_product_id,
+                product_uom = lv.line_uom_id
+            FROM line_vals lv
+            WHERE sm.id = lv.move_id
+              AND  sm.product_id IS DISTINCT FROM lv.line_product_id
+              ;
         """
     )
-    remaining_lines = env.cr.fetchone()[0]
+    fixed_sync = env.cr.rowcount
+    if fixed_sync:
+        _logger.info(
+            "UoM fix: synced %s stock_move_line product+uom from parent stock_move",
+            fixed_sync,
+        )
 
-    _logger.info(
-        "UoM fix: moves=%s lines=%s remaining_moves=%s remaining_lines=%s",
-        fixed_moves,
-        fixed_lines,
-        remaining_moves,
-        remaining_lines,
+    # # (A) Lines vs product template UoM (no JOIN on sml in FROM — PostgreSQL-safe)
+    # env.cr.execute(
+    #     """
+    #     UPDATE stock_move_line
+    #     SET product_uom_id = pt.uom_id
+    #     FROM product_product pp
+    #     JOIN product_template pt ON pt.id = pp.product_tmpl_id
+    #     JOIN uom_uom uom_prod ON uom_prod.id = pt.uom_id
+    #     WHERE stock_move_line.product_id = pp.id
+    #       AND stock_move_line.product_uom_id IS NOT NULL
+    #       AND EXISTS (
+    #           SELECT 1 FROM uom_uom uom_line
+    #           WHERE uom_line.id = stock_move_line.product_uom_id
+    #             AND uom_line.category_id IS DISTINCT FROM uom_prod.category_id
+    #       )
+    #     """
+    # )
+    # fixed_sml_product = env.cr.rowcount
+    # if fixed_sml_product:
+    #     _logger.info(
+    #         "UoM fix: aligned %s stock_move_line.product_uom_id to product uom",
+    #         fixed_sml_product,
+    #     )
+    #
+    # # (B1) stock.move._compute_quantity: line uom vs move.product_uom (same product)
+    # env.cr.execute(
+    #     """
+    #     UPDATE stock_move_line sml
+    #     SET product_uom_id = sm.product_uom
+    #     FROM stock_move sm,
+    #          uom_uom uom_move,
+    #          uom_uom uom_line
+    #     WHERE sml.move_id = sm.id
+    #       AND sml.product_id = sm.product_id
+    #       AND sm.product_uom IS NOT NULL
+    #       AND sml.product_uom_id IS NOT NULL
+    #       AND uom_move.id = sm.product_uom
+    #       AND uom_line.id = sml.product_uom_id
+    #       AND uom_line.category_id IS DISTINCT FROM uom_move.category_id
+    #     """
+    # )
+    # fixed_sml_move = env.cr.rowcount
+    # if fixed_sml_move:
+    #     _logger.info(
+    #         "UoM fix: aligned %s stock_move_line (line vs move → move uom)",
+    #         fixed_sml_move,
+    #     )
+    #
+    # # Second pass: line vs product (after line vs move alignment)
+    # env.cr.execute(
+    #     """
+    #     UPDATE stock_move_line
+    #     SET product_uom_id = pt.uom_id
+    #     FROM product_product pp
+    #     JOIN product_template pt ON pt.id = pp.product_tmpl_id
+    #     JOIN uom_uom uom_prod ON uom_prod.id = pt.uom_id
+    #     WHERE stock_move_line.product_id = pp.id
+    #       AND stock_move_line.product_uom_id IS NOT NULL
+    #       AND EXISTS (
+    #           SELECT 1 FROM uom_uom uom_line
+    #           WHERE uom_line.id = stock_move_line.product_uom_id
+    #             AND uom_line.category_id IS DISTINCT FROM uom_prod.category_id
+    #       )
+    #     """
+    # )
+    # fixed_sml_pass2 = env.cr.rowcount
+    # if fixed_sml_pass2:
+    #     _logger.info(
+    #         "UoM fix: second pass aligned %s stock_move_line vs product uom",
+    #         fixed_sml_pass2,
+    #     )
+
+
+def _fix_uom_category_mismatches_account_move_line(env):
+    """Align account_move_line.product_uom_id to product template uom when categories differ."""
+    env.cr.execute(
+        """
+            WITH candidates AS (
+                SELECT
+                    aml.id AS aml_id,
+                    MIN(ut.id) AS new_uom_id
+                FROM account_move_line aml
+                JOIN product_product pp ON aml.product_id = pp.id
+                JOIN product_template pt ON pt.id = pp.product_tmpl_id
+                JOIN uom_uom uom_prod ON uom_prod.id = pt.uom_id
+                JOIN uom_uom uom_line ON uom_line.id = aml.product_uom_id
+                JOIN uom_uom ut ON ut.category_id = uom_prod.category_id
+                WHERE aml.product_id IS NOT NULL
+                  AND aml.product_uom_id IS NOT NULL
+                  AND uom_line.category_id IS DISTINCT FROM uom_prod.category_id
+                  AND regexp_replace(
+                        lower(btrim(
+                            coalesce(
+                                uom_line.name->>'en_US',
+                                uom_line.name->>'en_IN',
+                                uom_line.name::text
+                            )
+                        )),
+                        's$', '', 'g'
+                      ) =
+                      regexp_replace(
+                        lower(btrim(
+                            coalesce(
+                                ut.name->>'en_US',
+                                ut.name->>'en_IN',
+                                ut.name::text
+                            )
+                        )),
+                        's$', '', 'g'
+                      )
+                GROUP BY aml.id
+            )
+            UPDATE account_move_line aml
+            SET product_uom_id = c.new_uom_id
+            FROM candidates c
+            WHERE aml.id = c.aml_id
+              AND aml.product_uom_id IS DISTINCT FROM c.new_uom_id;
+        """
     )
-    if remaining_moves or remaining_lines:
-        _logger.warning(
-            "UoM category mismatches remain: moves=%s lines=%s",
-            remaining_moves,
-            remaining_lines,
+    n = env.cr.rowcount
+    if n:
+        _logger.info(
+            "UoM fix: aligned %s account_move_line records to product uom",
+            n,
         )
 
 
 @openupgrade.migrate()
 def migrate(env, version):
-    _fix_uom_category_mismatches(env)
-    _fix_warehouse_related_companies(env)
     convert_company_dependent(env)
-    _create_default_new_types_for_all_warehouses(env)
+    # Fix company consistency before creating operation types.
+    _fix_warehouse_related_companies(env)
     _set_inter_company_locations(env)
+    _create_default_new_types_for_all_warehouses(env)
+    # UoM category fixes (single source of truth; do not duplicate in odi migrations).
+    _fix_uom_category_mismatches(env)
+    _fix_uom_category_mismatches_stock_move_line(env)
+    _fix_uom_category_mismatches_account_move_line(env)
     openupgrade.load_data(env, "stock", "18.0.1.1/noupdate_changes.xml")
     openupgrade.delete_records_safely_by_xml_id(
         env, ["stock.property_stock_customer", "stock.property_stock_supplier"]
