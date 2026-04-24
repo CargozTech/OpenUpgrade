@@ -1,5 +1,10 @@
 <?xml version='1.0' encoding='utf-8'?>
 <odoo>
+  <!-- Align with Odoo 18 odoo/addons/base/security/base_security.xml; OpenUpgrade + noupdate
+       can leave pre-18 domains on DB otherwise. -->
+  <record id="res_partner_bank_rule" model="ir.rule">
+    <field name="domain_force">[('company_id', 'in', company_ids + [False])]</field>
+  </record>
   <record id="AED" model="res.currency">
     <field name="iso_numeric">784</field>
   </record>

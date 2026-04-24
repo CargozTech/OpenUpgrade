@@ -1,0 +1,32 @@
+<?xml version='1.0' encoding='utf-8'?>
+<odoo>
+  <!-- Align with odi thirdparty helpdesk_mgmt/security/helpdesk_security.xml (lines ~52–124);
+       OpenUpgrade + noupdate can leave pre-18 domains on DB otherwise. -->
+  <record id="helpdesk_ticket_comp_rule" model="ir.rule">
+    <field name="domain_force">[('company_id', 'in', company_ids + [False])]</field>
+  </record>
+  <record id="helpdesk_ticket_category_comp_rule" model="ir.rule">
+    <field name="domain_force">[('company_id', 'in', company_ids + [False])]</field>
+  </record>
+  <record id="helpdesk_ticket_channel_comp_rule" model="ir.rule">
+    <field name="domain_force">[('company_id', 'in', company_ids + [False])]</field>
+  </record>
+  <record id="helpdesk_ticket_stage_comp_rule" model="ir.rule">
+    <field name="domain_force">[('company_id', 'in', company_ids + [False])]</field>
+  </record>
+  <record id="helpdesk_ticket_tag_comp_rule" model="ir.rule">
+    <field name="domain_force">[('company_id', 'in', company_ids + [False])]</field>
+  </record>
+  <record id="helpdesk_ticket_team_comp_rule" model="ir.rule">
+    <field name="domain_force">[('company_id', 'in', company_ids + [False])]</field>
+  </record>
+  <record id="helpdesk_ticket_team_portal_rule" model="ir.rule">
+    <field name="domain_force">[('show_in_portal','=',True)]</field>
+  </record>
+  <record id="helpdesk_ticket_rule_internal_user" model="ir.rule">
+    <field name="domain_force">['|', ('partner_id', '=', user.partner_id.id), ('message_partner_ids','=',user.partner_id.id)]</field>
+  </record>
+  <record id="helpdesk_ticket_rule_portal" model="ir.rule">
+    <field name="domain_force">['|', ('partner_id', 'child_of', [user.commercial_partner_id.id]), ('message_partner_ids','child_of',[user.commercial_partner_id.id])]</field>
+  </record>
+</odoo>

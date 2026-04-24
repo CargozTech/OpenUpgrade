@@ -3,4 +3,9 @@
   <record id="crm_pls_fields_param" model="ir.config_parameter">
     <field name="value">phone_state,email_state</field>
   </record>
+  <!-- Align with Odoo 18 crm/security/crm_security.xml; OpenUpgrade + noupdate
+       can leave pre-18 domains on DB otherwise. -->
+  <record id="crm_activity_report_rule_multi_company" model="ir.rule">
+    <field name="domain_force">[('company_id', 'in', company_ids + [False])]</field>
+  </record>
 </odoo>

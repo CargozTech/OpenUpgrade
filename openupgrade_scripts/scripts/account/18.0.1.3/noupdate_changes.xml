@@ -3,6 +3,14 @@
   <record id="account_comp_rule" model="ir.rule">
     <field name="domain_force">[('company_ids', 'parent_of', company_ids)]</field>
   </record>
+  <!-- Align with Odoo 18 account/security/account_security.xml; OpenUpgrade + noupdate
+       can leave pre-18 domains on DB otherwise. -->
+  <record id="account_bank_statement_comp_rule" model="ir.rule">
+    <field name="domain_force">[('company_id', 'in', company_ids + [False])]</field>
+  </record>
+  <record id="account_payment_comp_rule" model="ir.rule">
+    <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+  </record>
   <record id="account_payment_method_manual_in" model="account.payment.method">
     <field name="name">Manual Payment</field>
   </record>

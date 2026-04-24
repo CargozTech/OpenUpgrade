@@ -3,4 +3,9 @@
   <record id="analytic_plan_projects" model="account.analytic.plan" forcecreate="0">
     <field name="name">Project</field>
   </record>
+  <!-- Align with Odoo 18 analytic/security/analytic_security.xml; OpenUpgrade + noupdate
+       can leave pre-18 domains on DB otherwise. -->
+  <record id="analytic_line_comp_rule" model="ir.rule">
+    <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+  </record>
 </odoo>

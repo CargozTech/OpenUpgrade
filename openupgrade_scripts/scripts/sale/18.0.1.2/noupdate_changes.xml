@@ -1,5 +1,13 @@
 <?xml version='1.0' encoding='utf-8'?>
 <odoo>
+  <!-- Align with Odoo 18 sale/security/ir_rules.xml; OpenUpgrade + noupdate
+       can leave pre-18 domains on DB otherwise. -->
+  <record id="sale_order_line_comp_rule" model="ir.rule">
+    <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+  </record>
+  <record id="sale_order_report_comp_rule" model="ir.rule">
+    <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+  </record>
   <record id="email_template_edi_sale" model="mail.template">
     <field name="body_html" type="html">
       <div style="margin: 0px; padding: 0px;">
